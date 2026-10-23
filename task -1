@@ -1,0 +1,341 @@
+
+# ============================================================
+# DATHEON INTERNSHIP - TASK 1
+# Multimodel Benchmark Classification using Iris Dataset
+# Models: Logistic Regression and Decision Tree
+# ============================================================
+
+# 1. IMPORT LIBRARIES
+import warnings
+warnings.filterwarnings("ignore")
+
+from pathlib import Path
+import json
+import joblib
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.model_selection import (
+    train_test_split,
+    StratifiedKFold,
+    cross_validate
+)
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    classification_report,
+    confusion_matrix,
+    ConfusionMatrixDisplay
+)
+
+# 2. CONFIGURATION
+RANDOM_STATE = 42
+TEST_SIZE = 0.20
+OUTPUT_DIR = Path("outputs")
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+sns.set_theme(style="whitegrid", context="notebook")
+
+DATA_URL = (
+    "https://raw.githubusercontent.com/"
+    "mwaskom/seaborn-data/master/iris.csv"
+)
+
+# 3. LOAD AND VALIDATE DATA
+df = pd.read_csv(DATA_URL)
+
+required_columns = [
+    "sepal_length",
+    "sepal_width",
+    "petal_length",
+    "petal_width",
+    "species"
+]
+
+missing_columns = set(required_columns) - set(df.columns)
+if missing_columns:
+    raise ValueError(f"Missing required columns: {missing_columns}")
+
+df = df[required_columns].copy()
+
+if df.isnull().values.any():
+    df = df.dropna().reset_index(drop=True)
+
+if df.duplicated().any():
+    print("Warning: Duplicate rows found. Investigating before removal.")
+    print("Duplicate rows:", int(df.duplicated().sum()))
+    # Keep observations unless the dataset requirements
+    # explicitly call for removing duplicate measurements.
+
+X = df.drop(columns="species")
+y = df["species"]
+
+if y.nunique() < 2:
+    raise ValueError("Classification requires at least two classes.")
+
+print("=" * 65)
+print("DATASET OVERVIEW")
+print("=" * 65)
+print("Dataset shape:", df.shape)
+print("\nFirst 5 rows:\n", df.head())
+print("\nData types:\n", df.dtypes)
+print("\nMissing values:\n", df.isnull().sum())
+print("\nClass distribution:\n", y.value_counts())
+print("\nStatistical summary:\n", df.describe())
+
+# 4. EXPLORATORY DATA ANALYSIS
+plt.figure(figsize=(7, 5))
+sns.countplot(data=df, x="species", hue="species", legend=False)
+plt.title("Distribution of Iris Species")
+plt.xlabel("Species")
+plt.ylabel("Number of Samples")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "species_distribution.png", dpi=200)
+plt.show()
+
+pair_plot = sns.pairplot(
+    df,
+    hue="species",
+    diag_kind="hist",
+    corner=True
+)
+pair_plot.fig.suptitle("Iris Feature Pairplot", y=1.02)
+pair_plot.savefig(OUTPUT_DIR / "pairplot.png", dpi=200)
+plt.show()
+
+plt.figure(figsize=(8, 6))
+sns.heatmap(
+    X.corr(),
+    annot=True,
+    cmap="coolwarm",
+    fmt=".2f",
+    square=True
+)
+plt.title("Feature Correlation Heatmap")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "correlation_heatmap.png", dpi=200)
+plt.show()
+
+# 5. TRAIN-TEST SPLIT
+X_train, X_test, y_train, y_test = train_test_split(
+    X,
+    y,
+    test_size=TEST_SIZE,
+    random_state=RANDOM_STATE,
+    stratify=y
+)
+
+print("\nTraining samples:", len(X_train))
+print("Testing samples:", len(X_test))
+
+# 6. DEFINE MODELS
+models = {
+    "Logistic Regression": Pipeline([
+        ("scaler", StandardScaler()),
+        ("classifier", LogisticRegression(
+            max_iter=2000,
+            random_state=RANDOM_STATE
+        ))
+    ]),
+    "Decision Tree": DecisionTreeClassifier(
+        max_depth=4,
+        random_state=RANDOM_STATE
+    )
+}
+
+# 7. TRAIN, PREDICT AND EVALUATE
+results = []
+predictions = {}
+trained_models = {}
+report_records = []
+
+for model_name, model in models.items():
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+
+    trained_models[model_name] = model
+    predictions[model_name] = y_pred
+
+    metrics = {
+        "Model": model_name,
+        "Accuracy": accuracy_score(y_test, y_pred),
+        "Precision_Macro": precision_score(
+            y_test, y_pred, average="macro", zero_division=0
+        ),
+        "Recall_Macro": recall_score(
+            y_test, y_pred, average="macro", zero_division=0
+        ),
+        "F1_Macro": f1_score(
+            y_test, y_pred, average="macro", zero_division=0
+        )
+    }
+    results.append(metrics)
+
+    report = classification_report(
+        y_test,
+        y_pred,
+        output_dict=True,
+        zero_division=0
+    )
+
+    for class_name, values in report.items():
+        if isinstance(values, dict):
+            report_records.append({
+                "Model": model_name,
+                "Class": class_name,
+                **values
+            })
+
+    print(f"\n{'=' * 55}")
+    print(model_name.upper())
+    print("=" * 55)
+    print(classification_report(
+        y_test, y_pred, zero_division=0
+    ))
+
+results_df = pd.DataFrame(results)
+
+print("\nTEST SET BENCHMARK")
+print(results_df.round(4).to_string(index=False))
+
+results_df.to_csv(
+    OUTPUT_DIR / "model_benchmark.csv", index=False
+)
+pd.DataFrame(report_records).to_csv(
+    OUTPUT_DIR / "classification_reports.csv", index=False
+)
+
+# 8. MODEL COMPARISON CHART
+metric_columns = [
+    "Accuracy",
+    "Precision_Macro",
+    "Recall_Macro",
+    "F1_Macro"
+]
+
+ax = results_df.set_index("Model")[metric_columns].plot(
+    kind="bar",
+    figsize=(10, 6),
+    ylim=(0, 1.05),
+    rot=0
+)
+ax.set_title("Model Performance Comparison")
+ax.set_ylabel("Score")
+ax.set_xlabel("Model")
+ax.legend(loc="lower right")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "model_comparison.png", dpi=200)
+plt.show()
+
+# 9. CONFUSION MATRICES
+class_labels = sorted(y.unique())
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+for ax, (model_name, y_pred) in zip(
+    axes, predictions.items()
+):
+    cm = confusion_matrix(
+        y_test, y_pred, labels=class_labels
+    )
+    display = ConfusionMatrixDisplay(
+        confusion_matrix=cm,
+        display_labels=class_labels
+    )
+    display.plot(ax=ax, cmap="Blues", colorbar=False)
+    ax.set_title(f"Confusion Matrix: {model_name}")
+
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "confusion_matrices.png", dpi=200)
+plt.show()
+
+# 10. STRATIFIED 5-FOLD CROSS-VALIDATION
+cv = StratifiedKFold(
+    n_splits=5,
+    shuffle=True,
+    random_state=RANDOM_STATE
+)
+
+scoring = {
+    "accuracy": "accuracy",
+    "precision_macro": "precision_macro",
+    "recall_macro": "recall_macro",
+    "f1_macro": "f1_macro"
+}
+
+cv_records = []
+
+for model_name, model in models.items():
+    cv_result = cross_validate(
+        model,
+        X_train,
+        y_train,
+        cv=cv,
+        scoring=scoring,
+        return_train_score=False,
+        n_jobs=-1
+    )
+
+    record = {"Model": model_name}
+
+    for metric in scoring:
+        values = cv_result[f"test_{metric}"]
+        record[f"{metric}_mean"] = values.mean()
+        record[f"{metric}_std"] = values.std()
+
+    cv_records.append(record)
+
+cv_df = pd.DataFrame(cv_records)
+cv_df.to_csv(
+    OUTPUT_DIR / "cross_validation_results.csv",
+    index=False
+)
+
+print("\n5-FOLD CROSS-VALIDATION RESULTS")
+print(cv_df.round(4).to_string(index=False))
+
+# 11. IDENTIFY BEST MODEL
+best_row = results_df.loc[results_df["F1_Macro"].idxmax()]
+best_name = best_row["Model"]
+best_model = trained_models[best_name]
+
+print("\n" + "=" * 55)
+print("BEST MODEL ON THE HELD-OUT TEST SET")
+print("=" * 55)
+print("Model:", best_name)
+print(f"Accuracy:       {best_row['Accuracy']:.4f}")
+print(f"Macro Precision:{best_row['Precision_Macro']:.4f}")
+print(f"Macro Recall:   {best_row['Recall_Macro']:.4f}")
+print(f"Macro F1-score: {best_row['F1_Macro']:.4f}")
+
+# 12. SAVE THE BEST TRAINED MODEL
+joblib.dump(best_model, OUTPUT_DIR / "best_iris_model.joblib")
+
+# Save metadata for reproducibility
+metadata = {
+    "dataset": "Iris",
+    "source": DATA_URL,
+    "random_state": RANDOM_STATE,
+    "test_size": TEST_SIZE,
+    "features": list(X.columns),
+    "target": "species",
+    "selected_model": best_name,
+    "selection_metric": "Macro F1-score"
+}
+
+with open(OUTPUT_DIR / "metadata.json", "w") as file:
+    json.dump(metadata, file, indent=4)
+
+print("\nGenerated files:")
+for path in sorted(OUTPUT_DIR.iterdir()):
+    print("-", path)
+
+print("\nTASK 1 PIPELINE COMPLETED SUCCESSFULLY!")
