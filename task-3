@@ -1,0 +1,541 @@
+
+# ============================================================
+# DATHEON INTERNSHIP - TASK 3
+# PREDICTIVE CUSTOMER CHURN CLASSIFIER
+# Dataset: Telco Customer Churn
+# Models: Random Forest & XGBoost
+# ============================================================
+
+# 1. IMPORT LIBRARIES
+import warnings
+warnings.filterwarnings("ignore")
+
+from pathlib import Path
+import json
+import joblib
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.model_selection import (
+    train_test_split,
+    StratifiedKFold,
+    cross_validate
+)
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    roc_curve,
+    confusion_matrix,
+    classification_report,
+    ConfusionMatrixDisplay
+)
+
+from xgboost import XGBClassifier
+
+# ------------------------------------------------------------
+# 2. CONFIGURATION
+# ------------------------------------------------------------
+RANDOM_STATE = 42
+TEST_SIZE = 0.20
+OUTPUT_DIR = Path("task3_outputs")
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+sns.set_theme(style="whitegrid")
+
+DATA_URL = (
+    "https://raw.githubusercontent.com/IBM/"
+    "telco-customer-churn-on-icp4d/master/data/"
+    "Telco-Customer-Churn.csv"
+)
+
+# ------------------------------------------------------------
+# 3. LOAD DATASET
+# ------------------------------------------------------------
+df = pd.read_csv(DATA_URL)
+
+print("=" * 65)
+print("TELCO CUSTOMER CHURN - DATASET OVERVIEW")
+print("=" * 65)
+
+print("Dataset shape:", df.shape)
+print("\nFirst five rows:\n", df.head())
+print("\nColumn names:\n", df.columns.tolist())
+print("\nData types:\n", df.dtypes)
+print("\nMissing values:\n", df.isnull().sum())
+print("\nTarget distribution:\n", df["Churn"].value_counts())
+
+# ------------------------------------------------------------
+# 4. DATA CLEANING
+# ------------------------------------------------------------
+# CustomerID is an identifier, not a useful predictor.
+if "customerID" in df.columns:
+    df = df.drop(columns=["customerID"])
+
+# TotalCharges may contain blank strings.
+df["TotalCharges"] = pd.to_numeric(
+    df["TotalCharges"].astype(str).str.strip().replace("", np.nan),
+    errors="coerce"
+)
+
+# Remove rows with missing target values.
+df = df.dropna(subset=["Churn"]).copy()
+
+# Convert target to binary: No = 0, Yes = 1
+df["Churn"] = df["Churn"].map({"No": 0, "Yes": 1})
+
+if df["Churn"].isnull().any():
+    raise ValueError("Unexpected values found in Churn target.")
+
+df["Churn"] = df["Churn"].astype(int)
+
+print("\nMissing values after TotalCharges conversion:")
+print(df.isnull().sum())
+
+print("\nChurn distribution after cleaning:")
+print(df["Churn"].value_counts())
+
+# ------------------------------------------------------------
+# 5. EXPLORATORY DATA ANALYSIS
+# ------------------------------------------------------------
+
+# Churn class distribution
+plt.figure(figsize=(7, 5))
+sns.countplot(data=df, x="Churn", hue="Churn", legend=False)
+plt.xticks([0, 1], ["No Churn", "Churn"])
+plt.title("Customer Churn Distribution")
+plt.xlabel("Customer Status")
+plt.ylabel("Number of Customers")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "churn_distribution.png", dpi=200)
+plt.show()
+
+# Churn percentage
+churn_rate = df["Churn"].mean() * 100
+print(f"\nOverall churn rate: {churn_rate:.2f}%")
+
+# Tenure distribution by churn
+plt.figure(figsize=(8, 5))
+sns.histplot(
+    data=df,
+    x="tenure",
+    hue="Churn",
+    bins=30,
+    kde=True,
+    element="step"
+)
+plt.title("Tenure Distribution by Churn Status")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "tenure_by_churn.png", dpi=200)
+plt.show()
+
+# Monthly charges by churn
+plt.figure(figsize=(8, 5))
+sns.boxplot(data=df, x="Churn", y="MonthlyCharges")
+plt.xticks([0, 1], ["No Churn", "Churn"])
+plt.title("Monthly Charges by Churn Status")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "monthly_charges_by_churn.png", dpi=200)
+plt.show()
+
+# Numeric correlation heatmap
+numeric_for_corr = df.select_dtypes(include=np.number)
+
+plt.figure(figsize=(9, 7))
+sns.heatmap(
+    numeric_for_corr.corr(),
+    annot=True,
+    fmt=".2f",
+    cmap="coolwarm",
+    center=0
+)
+plt.title("Numeric Feature Correlation Heatmap")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "correlation_heatmap.png", dpi=200)
+plt.show()
+
+# ------------------------------------------------------------
+# 6. DEFINE FEATURES AND TARGET
+# ------------------------------------------------------------
+X = df.drop(columns=["Churn"])
+y = df["Churn"]
+
+numeric_features = X.select_dtypes(
+    include=np.number
+).columns.tolist()
+
+categorical_features = X.select_dtypes(
+    exclude=np.number
+).columns.tolist()
+
+print("\nNumeric features:", numeric_features)
+print("\nCategorical features:", categorical_features)
+print("\nTotal input features:", X.shape[1])
+
+# ------------------------------------------------------------
+# 7. TRAIN-TEST SPLIT
+# ------------------------------------------------------------
+X_train, X_test, y_train, y_test = train_test_split(
+    X,
+    y,
+    test_size=TEST_SIZE,
+    random_state=RANDOM_STATE,
+    stratify=y
+)
+
+print("\nTraining rows:", len(X_train))
+print("Testing rows:", len(X_test))
+
+# Calculate imbalance ratio using training data only.
+negative_count = int((y_train == 0).sum())
+positive_count = int((y_train == 1).sum())
+
+scale_pos_weight = negative_count / positive_count
+
+print("\nTraining class counts:")
+print("No Churn:", negative_count)
+print("Churn:", positive_count)
+print("XGBoost scale_pos_weight:", round(scale_pos_weight, 3))
+
+# ------------------------------------------------------------
+# 8. PREPROCESSING
+# ------------------------------------------------------------
+numeric_pipeline = Pipeline([
+    ("imputer", SimpleImputer(strategy="median")),
+    ("scaler", StandardScaler())
+])
+
+categorical_pipeline = Pipeline([
+    ("imputer", SimpleImputer(strategy="most_frequent")),
+    ("encoder", OneHotEncoder(handle_unknown="ignore"))
+])
+
+preprocessor = ColumnTransformer([
+    ("numeric", numeric_pipeline, numeric_features),
+    ("categorical", categorical_pipeline, categorical_features)
+])
+
+# ------------------------------------------------------------
+# 9. DEFINE ENSEMBLE CLASSIFIERS
+# ------------------------------------------------------------
+random_forest = Pipeline([
+    ("preprocessor", preprocessor),
+    ("classifier", RandomForestClassifier(
+        n_estimators=300,
+        max_depth=None,
+        min_samples_split=5,
+        min_samples_leaf=2,
+        class_weight="balanced",
+        random_state=RANDOM_STATE,
+        n_jobs=-1
+    ))
+])
+
+xgboost_model = Pipeline([
+    ("preprocessor", preprocessor),
+    ("classifier", XGBClassifier(
+        n_estimators=300,
+        max_depth=4,
+        learning_rate=0.05,
+        subsample=0.85,
+        colsample_bytree=0.85,
+        min_child_weight=2,
+        reg_lambda=1.0,
+        scale_pos_weight=scale_pos_weight,
+        objective="binary:logistic",
+        eval_metric="auc",
+        random_state=RANDOM_STATE,
+        n_jobs=1
+    ))
+])
+
+models = {
+    "Random Forest": random_forest,
+    "XGBoost": xgboost_model
+}
+
+# ------------------------------------------------------------
+# 10. STRATIFIED 5-FOLD CROSS-VALIDATION
+# ------------------------------------------------------------
+cv = StratifiedKFold(
+    n_splits=5,
+    shuffle=True,
+    random_state=RANDOM_STATE
+)
+
+scoring = {
+    "roc_auc": "roc_auc",
+    "accuracy": "accuracy",
+    "precision": "precision",
+    "recall": "recall",
+    "f1": "f1"
+}
+
+cv_records = []
+
+for model_name, model in models.items():
+    print(f"\nRunning cross-validation: {model_name}")
+
+    cv_results = cross_validate(
+        model,
+        X_train,
+        y_train,
+        cv=cv,
+        scoring=scoring,
+        n_jobs=-1,
+        return_train_score=False,
+        error_score="raise"
+    )
+
+    record = {"Model": model_name}
+
+    for metric in scoring:
+        scores = cv_results[f"test_{metric}"]
+        record[f"{metric.upper()}_CV_Mean"] = scores.mean()
+        record[f"{metric.upper()}_CV_Std"] = scores.std()
+
+    cv_records.append(record)
+
+cv_df = pd.DataFrame(cv_records)
+
+print("\nCROSS-VALIDATION RESULTS")
+print(cv_df.round(4).to_string(index=False))
+
+cv_df.to_csv(
+    OUTPUT_DIR / "cross_validation_results.csv",
+    index=False
+)
+
+# ------------------------------------------------------------
+# 11. FIT MODELS AND EVALUATE TEST SET
+# ------------------------------------------------------------
+results = []
+test_probabilities = {}
+test_predictions = {}
+fitted_models = {}
+
+for model_name, model in models.items():
+    print(f"\nTraining final model: {model_name}")
+
+    model.fit(X_train, y_train)
+
+    y_pred = model.predict(X_test)
+    y_prob = model.predict_proba(X_test)[:, 1]
+
+    fitted_models[model_name] = model
+    test_predictions[model_name] = y_pred
+    test_probabilities[model_name] = y_prob
+
+    metrics = {
+        "Model": model_name,
+        "Accuracy": accuracy_score(y_test, y_pred),
+        "Precision": precision_score(
+            y_test, y_pred, zero_division=0
+        ),
+        "Recall": recall_score(
+            y_test, y_pred, zero_division=0
+        ),
+        "F1_Score": f1_score(
+            y_test, y_pred, zero_division=0
+        ),
+        "ROC_AUC": roc_auc_score(y_test, y_prob)
+    }
+
+    results.append(metrics)
+
+    print(f"\n{model_name} - Classification Report")
+    print(classification_report(
+        y_test,
+        y_pred,
+        target_names=["No Churn", "Churn"],
+        zero_division=0
+    ))
+
+results_df = pd.DataFrame(results).sort_values(
+    "ROC_AUC", ascending=False
+)
+
+print("\n" + "=" * 65)
+print("FINAL TEST SET MODEL COMPARISON")
+print("=" * 65)
+print(results_df.round(4).to_string(index=False))
+
+results_df.to_csv(
+    OUTPUT_DIR / "model_comparison.csv",
+    index=False
+)
+
+# ------------------------------------------------------------
+# 12. ROC CURVE COMPARISON
+# ------------------------------------------------------------
+plt.figure(figsize=(9, 7))
+
+for model_name, y_prob in test_probabilities.items():
+    fpr, tpr, _ = roc_curve(y_test, y_prob)
+    auc_score = roc_auc_score(y_test, y_prob)
+
+    plt.plot(
+        fpr,
+        tpr,
+        linewidth=2,
+        label=f"{model_name} (AUC = {auc_score:.4f})"
+    )
+
+plt.plot([0, 1], [0, 1], "k--", label="Random Classifier")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curve - Customer Churn Models")
+plt.legend(loc="lower right")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "roc_auc_comparison.png", dpi=200)
+plt.show()
+
+# ------------------------------------------------------------
+# 13. CONFUSION MATRICES
+# ------------------------------------------------------------
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+for ax, (model_name, y_pred) in zip(
+    axes, test_predictions.items()
+):
+    cm = confusion_matrix(y_test, y_pred)
+
+    display = ConfusionMatrixDisplay(
+        confusion_matrix=cm,
+        display_labels=["No Churn", "Churn"]
+    )
+    display.plot(ax=ax, cmap="Blues", colorbar=False)
+    ax.set_title(f"Confusion Matrix - {model_name}")
+
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "confusion_matrices.png", dpi=200)
+plt.show()
+
+# ------------------------------------------------------------
+# 14. TOP 10 FEATURE IMPORTANCES
+# ------------------------------------------------------------
+for model_name, model in fitted_models.items():
+    classifier = model.named_steps["classifier"]
+    feature_names = (
+        model.named_steps["preprocessor"].get_feature_names_out()
+    )
+
+    importance_df = pd.DataFrame({
+        "Feature": feature_names,
+        "Importance": classifier.feature_importances_
+    }).sort_values("Importance", ascending=False)
+
+    top10 = importance_df.head(10).sort_values(
+        "Importance", ascending=True
+    )
+
+    print(f"\nTOP 10 FEATURES - {model_name}")
+    print(
+        importance_df.head(10).round(5).to_string(index=False)
+    )
+
+    safe_name = model_name.lower().replace(" ", "_")
+
+    importance_df.to_csv(
+        OUTPUT_DIR / f"{safe_name}_feature_importances.csv",
+        index=False
+    )
+
+    plt.figure(figsize=(10, 6))
+    plt.barh(top10["Feature"], top10["Importance"])
+    plt.title(f"Top 10 Feature Importances - {model_name}")
+    plt.xlabel("Feature Importance")
+    plt.ylabel("Feature")
+    plt.tight_layout()
+    plt.savefig(
+        OUTPUT_DIR / f"{safe_name}_top10_features.png",
+        dpi=200
+    )
+    plt.show()
+
+# ------------------------------------------------------------
+# 15. SELECT BEST MODEL USING TEST ROC-AUC
+# ------------------------------------------------------------
+# The test set is used only for final evaluation in a rigorous
+# workflow. For a formal final selection, use CV ROC-AUC instead.
+best_cv_row = cv_df.sort_values(
+    "ROC_AUC_CV_Mean", ascending=False
+).iloc[0]
+
+best_model_name = best_cv_row["Model"]
+best_model = fitted_models[best_model_name]
+
+best_test_row = results_df[
+    results_df["Model"] == best_model_name
+].iloc[0]
+
+print("\n" + "=" * 65)
+print("BEST MODEL SELECTED BY CROSS-VALIDATION ROC-AUC")
+print("=" * 65)
+print("Model:", best_model_name)
+print(f"CV ROC-AUC: {best_cv_row['ROC_AUC_CV_Mean']:.4f}")
+print(f"Test ROC-AUC: {best_test_row['ROC_AUC']:.4f}")
+print(f"Test Accuracy: {best_test_row['Accuracy']:.4f}")
+print(f"Test Precision: {best_test_row['Precision']:.4f}")
+print(f"Test Recall: {best_test_row['Recall']:.4f}")
+print(f"Test F1-score: {best_test_row['F1_Score']:.4f}")
+
+if best_test_row["ROC_AUC"] >= 0.80:
+    print("\nTarget ROC-AUC >= 0.80 achieved on test set.")
+else:
+    print(
+        "\nTest ROC-AUC is below 0.80. Consider further "
+        "feature engineering and tuning; do not alter test data."
+    )
+
+# ------------------------------------------------------------
+# 16. SAVE MODEL AND PREDICTIONS
+# ------------------------------------------------------------
+joblib.dump(
+    best_model,
+    OUTPUT_DIR / "best_churn_model.joblib"
+)
+
+prediction_output = pd.DataFrame({
+    "Actual_Churn": np.asarray(y_test),
+    "Predicted_Churn": test_predictions[best_model_name],
+    "Churn_Probability": test_probabilities[best_model_name]
+})
+
+prediction_output.to_csv(
+    OUTPUT_DIR / "test_predictions.csv",
+    index=False
+)
+
+metadata = {
+    "dataset_url": DATA_URL,
+    "target": "Churn",
+    "random_state": RANDOM_STATE,
+    "test_size": TEST_SIZE,
+    "models": ["Random Forest", "XGBoost"],
+    "imbalance_handling": {
+        "Random Forest": "class_weight='balanced'",
+        "XGBoost": "scale_pos_weight from training split"
+    },
+    "best_model_by_cv_roc_auc": best_model_name,
+    "cv_roc_auc": float(best_cv_row["ROC_AUC_CV_Mean"]),
+    "test_roc_auc": float(best_test_row["ROC_AUC"])
+}
+
+with open(OUTPUT_DIR / "project_metadata.json", "w") as f:
+    json.dump(metadata, f, indent=4)
+
+print("\nGenerated output files:")
+for file in sorted(OUTPUT_DIR.iterdir()):
+    print("-", file.name)
+
+print("\nTASK 3 COMPLETED SUCCESSFULLY!")
