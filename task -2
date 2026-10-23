@@ -1,0 +1,500 @@
+
+# ============================================================
+# DATHEON INTERNSHIP - TASK 2
+# REAL ESTATE HOUSING PRICE PREDICTION
+# Models: OLS, Ridge Regression, Lasso Regression
+# ============================================================
+
+import warnings
+warnings.filterwarnings("ignore")
+
+from pathlib import Path
+import json
+import joblib
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.model_selection import train_test_split, GridSearchCV, KFold
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.linear_model import LinearRegression, Ridge, Lasso
+from sklearn.metrics import (
+    mean_squared_error,
+    mean_absolute_error,
+    r2_score
+)
+
+# ------------------------------------------------------------
+# 1. CONFIGURATION
+# ------------------------------------------------------------
+RANDOM_STATE = 42
+TEST_SIZE = 0.20
+OUTPUT_DIR = Path("task2_outputs")
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+sns.set_theme(style="whitegrid")
+
+DATA_URL = (
+    "https://raw.githubusercontent.com/ageron/"
+    "handson-ml2/master/datasets/housing/housing.csv"
+)
+
+# ------------------------------------------------------------
+# 2. LOAD DATA
+# ------------------------------------------------------------
+df = pd.read_csv(DATA_URL)
+
+TARGET = "median_house_value"
+
+if TARGET not in df.columns:
+    raise ValueError(f"Target column '{TARGET}' not found.")
+
+df = df.drop_duplicates().reset_index(drop=True)
+
+print("=" * 70)
+print("CALIFORNIA HOUSING DATASET OVERVIEW")
+print("=" * 70)
+print("Dataset shape:", df.shape)
+print("\nFirst five rows:\n", df.head())
+print("\nData types:\n", df.dtypes)
+print("\nMissing values:\n", df.isnull().sum())
+print("\nStatistical summary:\n", df.describe(include="all"))
+
+# ------------------------------------------------------------
+# 3. VALIDATE TARGET
+# ------------------------------------------------------------
+df = df.dropna(subset=[TARGET]).copy()
+
+X = df.drop(columns=[TARGET])
+y = df[TARGET].astype(float)
+
+print("\nTarget variable:", TARGET)
+print("Target mean:", round(y.mean(), 2))
+print("Target median:", round(y.median(), 2))
+
+# ------------------------------------------------------------
+# 4. EXPLORATORY DATA ANALYSIS
+# ------------------------------------------------------------
+
+# Target distribution
+plt.figure(figsize=(9, 5))
+sns.histplot(y, bins=50, kde=True)
+plt.title("Distribution of Median House Values")
+plt.xlabel("Median House Value ($)")
+plt.ylabel("Frequency")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "target_distribution.png", dpi=200)
+plt.show()
+
+# Missing-value chart
+missing = df.isnull().sum()
+missing = missing[missing > 0].sort_values(ascending=False)
+
+if len(missing) > 0:
+    plt.figure(figsize=(8, 4))
+    sns.barplot(x=missing.values, y=missing.index)
+    plt.title("Missing Values by Feature")
+    plt.xlabel("Missing count")
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "missing_values.png", dpi=200)
+    plt.show()
+else:
+    print("\nNo missing values detected.")
+
+# Correlation heatmap of original numeric features
+numeric_df = df.select_dtypes(include=np.number)
+
+plt.figure(figsize=(11, 8))
+sns.heatmap(
+    numeric_df.corr(),
+    annot=True,
+    fmt=".2f",
+    cmap="coolwarm",
+    center=0
+)
+plt.title("Correlation Heatmap - Original Numeric Features")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "correlation_heatmap.png", dpi=200)
+plt.show()
+
+# Geographic distribution
+plt.figure(figsize=(9, 6))
+scatter = plt.scatter(
+    df["longitude"],
+    df["latitude"],
+    c=df[TARGET],
+    s=4,
+    alpha=0.5,
+    cmap="viridis"
+)
+plt.colorbar(scatter, label="Median House Value ($)")
+plt.title("California Housing Prices by Geographic Location")
+plt.xlabel("Longitude")
+plt.ylabel("Latitude")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "geographic_distribution.png", dpi=200)
+plt.show()
+
+# ------------------------------------------------------------
+# 5. FEATURE ENGINEERING
+# ------------------------------------------------------------
+def engineer_features(data):
+    data = data.copy()
+
+    # Ratios commonly used in housing analysis
+    data["rooms_per_household"] = (
+        data["total_rooms"] / data["households"].replace(0, np.nan)
+    )
+
+    data["bedrooms_per_room"] = (
+        data["total_bedrooms"] /
+        data["total_rooms"].replace(0, np.nan)
+    )
+
+    data["population_per_household"] = (
+        data["population"] /
+        data["households"].replace(0, np.nan)
+    )
+
+    # Interaction feature
+    data["income_x_rooms"] = (
+        data["median_income"] * data["rooms_per_household"]
+    )
+
+    data["income_x_location"] = (
+        data["median_income"] * data["latitude"]
+    )
+
+    return data
+
+
+X = engineer_features(X)
+
+numeric_features = X.select_dtypes(include=np.number).columns.tolist()
+categorical_features = X.select_dtypes(
+    exclude=np.number
+).columns.tolist()
+
+print("\nNumeric features:", numeric_features)
+print("Categorical features:", categorical_features)
+print("Feature count after engineering:", X.shape[1])
+
+# ------------------------------------------------------------
+# 6. TRAIN-TEST SPLIT
+# ------------------------------------------------------------
+X_train, X_test, y_train, y_test = train_test_split(
+    X,
+    y,
+    test_size=TEST_SIZE,
+    random_state=RANDOM_STATE
+)
+
+print("\nTraining samples:", len(X_train))
+print("Testing samples:", len(X_test))
+
+# ------------------------------------------------------------
+# 7. MULTICOLLINEARITY DIAGNOSTICS
+# ------------------------------------------------------------
+# Use training data only. Imputation is fitted on training data.
+vif_frame = X_train[numeric_features].copy()
+
+vif_imputer = SimpleImputer(strategy="median")
+vif_values = vif_imputer.fit_transform(vif_frame)
+
+vif_frame = pd.DataFrame(
+    vif_values,
+    columns=numeric_features
+)
+
+# Correlation between engineered numeric features
+plt.figure(figsize=(13, 10))
+sns.heatmap(
+    vif_frame.corr(),
+    cmap="coolwarm",
+    center=0
+)
+plt.title("Correlation Heatmap - Engineered Numeric Features")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "engineered_correlation_heatmap.png", dpi=200)
+plt.show()
+
+# VIF is optional because statsmodels may not be installed.
+try:
+    from statsmodels.stats.outliers_influence import variance_inflation_factor
+
+    vif_results = []
+
+    for i, column in enumerate(vif_frame.columns):
+        try:
+            vif = variance_inflation_factor(
+                vif_frame.to_numpy(dtype=float), i
+            )
+        except Exception:
+            vif = np.inf
+
+        vif_results.append({
+            "Feature": column,
+            "VIF": vif
+        })
+
+    vif_df = pd.DataFrame(vif_results).sort_values(
+        "VIF", ascending=False
+    )
+    vif_df.to_csv(OUTPUT_DIR / "vif_analysis.csv", index=False)
+
+    print("\nVIF MULTICOLLINEARITY ANALYSIS")
+    print(vif_df.round(3).to_string(index=False))
+    print(
+        "\nHigh VIF indicates potential multicollinearity. "
+        "Review it alongside correlations and model stability."
+    )
+
+except ImportError:
+    print(
+        "\nOptional VIF analysis skipped. Install statsmodels "
+        "to calculate VIF: pip install statsmodels"
+    )
+
+# ------------------------------------------------------------
+# 8. PREPROCESSING PIPELINE
+# ------------------------------------------------------------
+numeric_pipeline = Pipeline([
+    ("imputer", SimpleImputer(strategy="median")),
+    ("scaler", StandardScaler())
+])
+
+categorical_pipeline = Pipeline([
+    ("imputer", SimpleImputer(strategy="most_frequent")),
+    ("encoder", OneHotEncoder(handle_unknown="ignore"))
+])
+
+preprocessor = ColumnTransformer([
+    ("numeric", numeric_pipeline, numeric_features),
+    ("categorical", categorical_pipeline, categorical_features)
+])
+
+# ------------------------------------------------------------
+# 9. DEFINE MODELS AND HYPERPARAMETER GRIDS
+# ------------------------------------------------------------
+ols_model = Pipeline([
+    ("preprocessor", preprocessor),
+    ("regressor", LinearRegression())
+])
+
+ridge_model = Pipeline([
+    ("preprocessor", preprocessor),
+    ("regressor", Ridge())
+])
+
+lasso_model = Pipeline([
+    ("preprocessor", preprocessor),
+    ("regressor", Lasso(max_iter=20000, tol=1e-4))
+])
+
+# Use negative RMSE so GridSearchCV maximizes the score.
+cv = KFold(
+    n_splits=5,
+    shuffle=True,
+    random_state=RANDOM_STATE
+)
+
+ridge_search = GridSearchCV(
+    estimator=ridge_model,
+    param_grid={
+        "regressor__alpha": [0.01, 0.1, 1, 10, 100, 1000]
+    },
+    scoring="neg_root_mean_squared_error",
+    cv=cv,
+    n_jobs=-1,
+    refit=True
+)
+
+lasso_search = GridSearchCV(
+    estimator=lasso_model,
+    param_grid={
+        "regressor__alpha": [0.001, 0.01, 0.1, 1, 10, 100]
+    },
+    scoring="neg_root_mean_squared_error",
+    cv=cv,
+    n_jobs=-1,
+    refit=True
+)
+
+# ------------------------------------------------------------
+# 10. TRAIN MODELS
+# ------------------------------------------------------------
+print("\nTraining OLS...")
+ols_model.fit(X_train, y_train)
+
+print("Tuning Ridge with GridSearchCV...")
+ridge_search.fit(X_train, y_train)
+
+print("Tuning Lasso with GridSearchCV...")
+lasso_search.fit(X_train, y_train)
+
+trained_models = {
+    "OLS": ols_model,
+    "Ridge": ridge_search.best_estimator_,
+    "Lasso": lasso_search.best_estimator_
+}
+
+print("\nBest Ridge parameters:", ridge_search.best_params_)
+print("Best Lasso parameters:", lasso_search.best_params_)
+
+# Save hyperparameter search results
+pd.DataFrame(ridge_search.cv_results_).to_csv(
+    OUTPUT_DIR / "ridge_grid_search.csv", index=False
+)
+pd.DataFrame(lasso_search.cv_results_).to_csv(
+    OUTPUT_DIR / "lasso_grid_search.csv", index=False
+)
+
+# ------------------------------------------------------------
+# 11. EVALUATION
+# ------------------------------------------------------------
+results = []
+prediction_data = {}
+
+for model_name, model in trained_models.items():
+    y_pred = model.predict(X_test)
+    prediction_data[model_name] = y_pred
+
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    mae = mean_absolute_error(y_test, y_pred)
+    r2 = r2_score(y_test, y_pred)
+
+    results.append({
+        "Model": model_name,
+        "RMSE": rmse,
+        "MAE": mae,
+        "R2": r2
+    })
+
+results_df = pd.DataFrame(results).sort_values(
+    "RMSE", ascending=True
+)
+
+print("\n" + "=" * 70)
+print("FINAL TEST SET MODEL COMPARISON")
+print("=" * 70)
+print(results_df.round(3).to_string(index=False))
+
+results_df.to_csv(
+    OUTPUT_DIR / "model_comparison.csv", index=False
+)
+
+# ------------------------------------------------------------
+# 12. ACTUAL VS PREDICTED PLOTS
+# ------------------------------------------------------------
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+for ax, (model_name, y_pred) in zip(
+    axes, prediction_data.items()
+):
+    ax.scatter(y_test, y_pred, alpha=0.25, s=10)
+
+    lower = min(float(y_test.min()), float(y_pred.min()))
+    upper = max(float(y_test.max()), float(y_pred.max()))
+
+    ax.plot([lower, upper], [lower, upper], "r--")
+    ax.set_title(f"{model_name}: Actual vs Predicted")
+    ax.set_xlabel("Actual House Value ($)")
+    ax.set_ylabel("Predicted House Value ($)")
+
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "actual_vs_predicted.png", dpi=200)
+plt.show()
+
+# ------------------------------------------------------------
+# 13. RESIDUAL DISTRIBUTION AND RESIDUAL PLOTS
+# ------------------------------------------------------------
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+for ax, (model_name, y_pred) in zip(
+    axes, prediction_data.items()
+):
+    residuals = np.asarray(y_test) - y_pred
+
+    sns.histplot(residuals, kde=True, ax=ax)
+    ax.axvline(0, color="red", linestyle="--")
+    ax.set_title(f"{model_name}: Residual Distribution")
+    ax.set_xlabel("Residual (Actual - Predicted)")
+
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "residual_distributions.png", dpi=200)
+plt.show()
+
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+for ax, (model_name, y_pred) in zip(
+    axes, prediction_data.items()
+):
+    residuals = np.asarray(y_test) - y_pred
+
+    ax.scatter(y_pred, residuals, alpha=0.25, s=10)
+    ax.axhline(0, color="red", linestyle="--")
+    ax.set_title(f"{model_name}: Residual Plot")
+    ax.set_xlabel("Predicted House Value ($)")
+    ax.set_ylabel("Residual ($)")
+
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "residual_plots.png", dpi=200)
+plt.show()
+
+# ------------------------------------------------------------
+# 14. BEST MODEL
+# ------------------------------------------------------------
+best_row = results_df.iloc[0]
+best_model_name = best_row["Model"]
+best_model = trained_models[best_model_name]
+
+print("\n" + "=" * 70)
+print("BEST MODEL BASED ON TEST RMSE")
+print("=" * 70)
+print("Model:", best_model_name)
+print(f"RMSE: ${best_row['RMSE']:,.2f}")
+print(f"MAE:  ${best_row['MAE']:,.2f}")
+print(f"R2:   {best_row['R2']:.4f}")
+
+# ------------------------------------------------------------
+# 15. SAVE MODEL AND PREDICTIONS
+# ------------------------------------------------------------
+joblib.dump(
+    best_model,
+    OUTPUT_DIR / "best_housing_price_model.joblib"
+)
+
+prediction_output = pd.DataFrame({
+    "Actual_House_Value": np.asarray(y_test),
+})
+
+for model_name, y_pred in prediction_data.items():
+    prediction_output[f"{model_name}_Prediction"] = y_pred
+
+prediction_output.to_csv(
+    OUTPUT_DIR / "test_predictions.csv", index=False
+)
+
+metadata = {
+    "dataset_url": DATA_URL,
+    "target": TARGET,
+    "random_state": RANDOM_STATE,
+    "test_size": TEST_SIZE,
+    "models": ["OLS", "Ridge", "Lasso"],
+    "best_model_by_test_rmse": best_model_name,
+    "best_ridge_parameters": ridge_search.best_params_,
+    "best_lasso_parameters": lasso_search.best_params_
+}
+
+with open(OUTPUT_DIR / "project_metadata.json", "w") as f:
+    json.dump(metadata, f, indent=4)
+
+print("\nSaved output files:")
+for file in sorted(OUTPUT_DIR.iterdir()):
+    print("-", file.name)
+
+print("\nTASK 2 COMPLETED SUCCESSFULLY!")
